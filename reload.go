@@ -95,6 +95,57 @@ func New(directories ...string) *Reloader {
 	}
 }
 
+func expectingDocument(h http.Header) bool {
+	// If set, we can guarantee that it is either html or not
+	if dest := h.Get("Sec-Fetch-Dest"); dest != "" {
+		return strings.EqualFold(dest, "document")
+	}
+
+	// WebSocket isn't html for sure
+	if strings.EqualFold(h.Get("Upgrade"), "websocket") {
+		return false
+	}
+
+	// SSE request will contain only value in Accept
+	if strings.EqualFold(h.Get("Accept"), "text/event-stream") {
+		return false
+	}
+
+	accept := h.Values("Accept")
+	if len(accept) == 0 {
+		// Could be anything
+		return true
+	}
+
+	// Consider */* only when it's first item.
+	ct := accept[0]
+
+	dind := strings.IndexAny(ct, ";,")
+	if dind > -1 {
+		ct = ct[:dind]
+	}
+
+	if ct == "*/*" {
+		return true
+	}
+
+	for _, val := range accept {
+		for ct = range strings.SplitSeq(val, ",") {
+			dind = strings.IndexByte(ct, ';')
+			if dind > -1 {
+				ct = ct[:dind]
+			}
+
+			switch strings.TrimSpace(ct) {
+			case "text/html", "application/xhtml+xml", "application/xml":
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // Handle starts the reload middleware, watching the specified directories and injecting the script into HTML responses.
 func (reload *Reloader) Handle(next http.Handler) http.Handler {
 	// Only init the watcher once
@@ -110,17 +161,15 @@ func (reload *Reloader) Handle(next http.Handler) http.Handler {
 			reload.ServeWS(w, r)
 			return
 		}
-		if dest := r.Header.Get("Sec-Fetch-Dest"); dest != "" && dest != "document" {
-			// Only requests with Sec-Fetch-Dest == "document" will have HTML document responses.
+
+		// Avoid wrapping when there's no document expected.
+		if !expectingDocument(r.Header) {
+			reload.logDebug("assume no html (Sec-Fetch-Dest: %q; Accept: %q): %q", r.Header.Get("Sec-Fetch-Dest"), r.Header.Get("Accept"), r.URL.Path)
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Forward Server-Sent Events (SSE) without unnecessary copying
-		if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
-			next.ServeHTTP(w, r)
-			return
-		}
+		reload.logDebug("likely received request for HTML page: %q", r.URL.Path)
 
 		// set headers first so that they're sent with the initial response
 		if reload.DisableCaching {
