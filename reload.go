@@ -41,6 +41,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -256,12 +257,20 @@ var injectTemplate = template.Must(template.New("inject").Parse(injectScript))
 
 // InjectScript writes the javascript to a buffer.
 func InjectScript(wr io.Writer, endpoint string) error {
+	uri, err := url.Parse(endpoint)
+	if err != nil {
+		return err
+	}
+
+	q := uri.Query()
+	q.Add("v", strconv.Itoa(wsCurrentVersion))
+
+	uri.RawQuery = q.Encode()
+
 	return injectTemplate.Execute(wr, struct {
 		Endpoint template.JSStr
-		Version  int
 	}{
-		Endpoint: template.JSStr(endpoint),
-		Version:  wsCurrentVersion,
+		Endpoint: template.JSStr(uri.String()),
 	})
 }
 
