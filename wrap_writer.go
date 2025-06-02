@@ -13,25 +13,26 @@ import (
 // The original work was derived from Goji's middleware (https://github.com/zenazn/goji/tree/master/web/middleware)
 
 func newWrapResponseWriter(w http.ResponseWriter, protoMajor int, scriptSize int) wrapResponseWriter {
-	_, fl := w.(http.Flusher)
-
 	bw := basicWriter{ResponseWriter: w, scriptSize: scriptSize}
+
+	_, fl := w.(http.Flusher)
+	_, rf := w.(io.ReaderFrom)
 
 	if protoMajor == 2 {
 		_, ps := w.(http.Pusher)
-		if fl && ps {
-			return &http2FancyWriter{bw}
+
+		if fl && ps && rf {
+			return &http2FancyWriter{flushWriter{bw}}
 		}
 	} else {
 		_, hj := w.(http.Hijacker)
-		_, rf := w.(io.ReaderFrom)
-		if fl && hj && rf {
-			return &httpFancyWriter{bw}
-		}
-		if fl && hj {
-			return &flushHijackWriter{bw}
-		}
-		if hj {
+
+		switch {
+		case fl && hj && rf:
+			return &httpFancyWriter{flushHijackWriter{flushWriter{bw}}}
+		case fl && hj:
+			return &flushHijackWriter{flushWriter{bw}}
+		case hj:
 			return &hijackWriter{bw}
 		}
 	}
@@ -73,7 +74,6 @@ type basicWriter struct {
 }
 
 func (b *basicWriter) WriteHeader(code int) {
-
 	headers := b.Header()
 
 	// If the Content-Length is set, and the Content-Type is HTML, then injecting
@@ -137,8 +137,7 @@ type flushWriter struct {
 
 func (f *flushWriter) Flush() {
 	f.wroteHeader = true
-	fl := f.basicWriter.ResponseWriter.(http.Flusher)
-	fl.Flush()
+	f.ResponseWriter.(http.Flusher).Flush()
 }
 
 var _ http.Flusher = &flushWriter{}
@@ -149,26 +148,18 @@ type hijackWriter struct {
 }
 
 func (f *hijackWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	hj := f.basicWriter.ResponseWriter.(http.Hijacker)
-	return hj.Hijack()
+	return f.ResponseWriter.(http.Hijacker).Hijack()
 }
 
 var _ http.Hijacker = &hijackWriter{}
 
 // flushHijackWriter ...
 type flushHijackWriter struct {
-	basicWriter
-}
-
-func (f *flushHijackWriter) Flush() {
-	f.wroteHeader = true
-	fl := f.basicWriter.ResponseWriter.(http.Flusher)
-	fl.Flush()
+	flushWriter
 }
 
 func (f *flushHijackWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	hj := f.basicWriter.ResponseWriter.(http.Hijacker)
-	return hj.Hijack()
+	return f.ResponseWriter.(http.Hijacker).Hijack()
 }
 
 var (
@@ -181,41 +172,27 @@ var (
 // of wrapping the http.ResponseWriter that package http gives you, in order to
 // make the proxied object support the full method set of the proxied object.
 type httpFancyWriter struct {
-	basicWriter
-}
-
-func (f *httpFancyWriter) Flush() {
-	f.wroteHeader = true
-	fl := f.basicWriter.ResponseWriter.(http.Flusher)
-	fl.Flush()
-}
-
-func (f *httpFancyWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	hj := f.basicWriter.ResponseWriter.(http.Hijacker)
-	return hj.Hijack()
-}
-
-func (f *http2FancyWriter) Push(target string, opts *http.PushOptions) error {
-	return f.basicWriter.ResponseWriter.(http.Pusher).Push(target, opts)
+	flushHijackWriter
 }
 
 func (f *httpFancyWriter) ReadFrom(r io.Reader) (int64, error) {
-	if f.basicWriter.tee != nil {
+	if f.tee != nil {
 		n, err := io.Copy(&f.basicWriter, r)
-		f.basicWriter.bytes += int(n)
+		f.bytes += int(n)
 		return n, err
 	}
-	rf := f.basicWriter.ResponseWriter.(io.ReaderFrom)
-	f.basicWriter.maybeWriteHeader()
+
+	rf := f.ResponseWriter.(io.ReaderFrom)
+	f.maybeWriteHeader()
+
 	n, err := rf.ReadFrom(r)
-	f.basicWriter.bytes += int(n)
+	f.bytes += int(n)
 	return n, err
 }
 
 var (
 	_ http.Flusher  = &httpFancyWriter{}
 	_ http.Hijacker = &httpFancyWriter{}
-	_ http.Pusher   = &http2FancyWriter{}
 	_ io.ReaderFrom = &httpFancyWriter{}
 )
 
@@ -224,13 +201,30 @@ var (
 // of wrapping the http.ResponseWriter that package http gives you, in order to
 // make the proxied object support the full method set of the proxied object.
 type http2FancyWriter struct {
-	basicWriter
+	flushWriter
 }
 
-func (f *http2FancyWriter) Flush() {
-	f.wroteHeader = true
-	fl := f.basicWriter.ResponseWriter.(http.Flusher)
-	fl.Flush()
+func (f *http2FancyWriter) ReadFrom(r io.Reader) (int64, error) {
+	if f.tee != nil {
+		n, err := io.Copy(&f.basicWriter, r)
+		f.bytes += int(n)
+		return n, err
+	}
+
+	rf := f.ResponseWriter.(io.ReaderFrom)
+	f.maybeWriteHeader()
+
+	n, err := rf.ReadFrom(r)
+	f.bytes += int(n)
+	return n, err
 }
 
-var _ http.Flusher = &http2FancyWriter{}
+func (f *http2FancyWriter) Push(target string, opts *http.PushOptions) error {
+	return f.ResponseWriter.(http.Pusher).Push(target, opts)
+}
+
+var (
+	_ http.Flusher  = &http2FancyWriter{}
+	_ http.Pusher   = &http2FancyWriter{}
+	_ io.ReaderFrom = &http2FancyWriter{}
+)
