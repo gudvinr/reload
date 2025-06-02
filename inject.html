@@ -1,21 +1,25 @@
-<script>
-	function retry() {
-		setTimeout(() => listen(true), 1000)
-	}
-	function listen(isRetry) {
+<script type="module">
+	function listen(onopen) {
 		const url = new URL("{{ .Endpoint }}", location.href);
 		url.protocol = (location.protocol === "https:") ? "wss:" : "ws:";
 
 		const ws = new WebSocket(url);
-		if(isRetry) {
-			ws.onopen = () => window.location.reload()
-		}
-		ws.onmessage = function(msg) {
-			if(msg.data === "reload") {
-			  window.location.reload()
+
+		ws.onopen = onopen;
+
+		ws.onmessage = (msg) => {
+			if (msg.data === "reload") {
+				window.location.reload();
 			}
 		}
-		ws.onclose = retry
+
+		ws.onclose = () => {
+			setTimeout(
+				() => { listen(window.location.reload); },
+				1000
+			);
+		}
 	}
-	listen(false)
+
+	export default await listen();
 </script>
