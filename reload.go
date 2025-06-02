@@ -36,18 +36,23 @@
 package reload
 
 import (
-	"fmt"
+	"bytes"
+	"html/template"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
+
+	_ "embed"
 )
 
 // incremented each time a breaking change is made
-const wsCurrentVersion = "1"
+const wsCurrentVersion = 1
 
 type Reloader struct {
 	// OnReload will be called after a file changes, but before the browser reloads.
@@ -144,11 +149,17 @@ func expectingDocument(h http.Header) bool {
 // Handle starts the reload middleware, watching the specified directories and injecting the script into HTML responses.
 func (reload *Reloader) Handle(next http.Handler) http.Handler {
 	// Only init the watcher once
+	var scriptToInject []byte
 	reload.startedWatcher.Do(func() {
+		var buf bytes.Buffer
+		if err := InjectScript(&buf, reload.Endpoint); err != nil {
+			panic(err)
+		}
+
+		scriptToInject = buf.Bytes()
+
 		go reload.WatchDirectories()
 	})
-
-	scriptToInject := InjectedScript(reload.Endpoint)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Endpoint == "/reload_ws" by default
@@ -192,7 +203,7 @@ func (reload *Reloader) Handle(next http.Handler) http.Handler {
 			// just append the script to the end of the document
 			// this is invalid HTML, but browsers will accept it anyways
 			// should be fine for development purposes
-			w.Write([]byte(scriptToInject))
+			w.Write(scriptToInject)
 		}
 	})
 }
@@ -201,17 +212,28 @@ func (reload *Reloader) Handle(next http.Handler) http.Handler {
 // Implementing your own is easy enough if you
 // don't want to use 'gorilla/websocket'
 func (reload *Reloader) ServeWS(w http.ResponseWriter, r *http.Request) {
-	version := r.URL.Query().Get("v")
-	if version != wsCurrentVersion {
+	var version int
+
+	var err error
+	if version, err = strconv.Atoi(r.URL.Query().Get("v")); err != nil {
+		reload.Logger.ErrorContext(r.Context(), "version parse", "err", err)
+		http.Error(w, "serve error", http.StatusInternalServerError)
+		return
+	}
+
+	if version < wsCurrentVersion {
 		reload.Logger.ErrorContext(r.Context(), "Injected script version is out of date",
 			"got", version,
 			"expected", wsCurrentVersion,
 		)
+		http.Error(w, "script error", http.StatusBadRequest)
+		return
 	}
 
 	conn, err := reload.Upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		reload.Logger.ErrorContext(r.Context(), "ServeWS error", "err", err)
+		http.Error(w, "serve error", http.StatusInternalServerError)
 		return
 	}
 
@@ -228,28 +250,19 @@ func (reload *Reloader) Wait() {
 	reload.cond.L.Unlock()
 }
 
-// InjectedScript returns the javascript that will be injected on each HTML page.
-func InjectedScript(endpoint string) string {
-	return fmt.Sprintf(`
-<script>
-	function retry() {
-	  setTimeout(() => listen(true), 1000)
-	}
-	function listen(isRetry) {
-      let protocol = location.protocol === "https:" ? "wss://" : "ws://"
-	  let ws = new WebSocket(protocol + location.host + "%s?v=%s")
-	  if(isRetry) {
-	    ws.onopen = () => window.location.reload()
-	  }
-	  ws.onmessage = function(msg) {
-	    if(msg.data === "reload") {
-	      window.location.reload()
-	    }
-	  }
-	  ws.onclose = retry
-	}
-	listen(false)
-</script>`, endpoint, wsCurrentVersion)
+//go:embed inject.html
+var injectScript string
+var injectTemplate = template.Must(template.New("inject").Parse(injectScript))
+
+// InjectScript writes the javascript to a buffer.
+func InjectScript(wr io.Writer, endpoint string) error {
+	return injectTemplate.Execute(wr, struct {
+		Endpoint template.JSStr
+		Version  int
+	}{
+		Endpoint: template.JSStr(endpoint),
+		Version:  wsCurrentVersion,
+	})
 }
 
 // fixedBuffer implements io.Writer and writes to a fixed-size []byte slice.
