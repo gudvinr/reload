@@ -5,7 +5,6 @@ import (
 	"io/fs"
 	"path"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/bep/debounce"
@@ -16,13 +15,13 @@ import (
 // broadcasts on write.
 func (reload *Reloader) WatchDirectories() {
 	if len(reload.directories) == 0 {
-		reload.logError("no directories provided (reload.Directories is empty)\n")
+		reload.Logger.Error("no directories provided (reload.Directories is empty)")
 		return
 	}
 
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
-		reload.logError("error initializing fsnotify watcher: %s\n", err)
+		reload.Logger.Error("error initializing fsnotify watcher", "err", err)
 	}
 
 	defer w.Close()
@@ -32,31 +31,31 @@ func (reload *Reloader) WatchDirectories() {
 		if err != nil {
 			var pathErr *fs.PathError
 			if errors.As(err, &pathErr) {
-				reload.logError("directory doesn't exist: %s\n", pathErr.Path)
-			} else {
-				reload.logError("error walking directories: %s\n", err)
+				path = pathErr.Path
 			}
+			reload.Logger.Error("error walking directories", "path", path, "err", err)
 			return
 		}
+
 		for _, dir := range directories {
 			// Path is converted to absolute path, so that fsnotify.Event also contains
 			// absolute paths
 			absPath, err := filepath.Abs(dir)
 			if err != nil {
-				reload.logError("Failed to convert path to absolute path: %s\n", err)
+				reload.Logger.Error("Failed to convert path to absolute path", "err", err)
 				continue
 			}
 			w.Add(absPath)
 		}
 	}
 
-	reload.logDebug("watching %s for changes\n", strings.Join(reload.directories, ","))
+	reload.Logger.Info("watching for changes", "directories", reload.directories)
 
 	debounce := debounce.New(100 * time.Millisecond)
 
 	callback := func(path string) func() {
 		return func() {
-			reload.logDebug("Edit %s\n", path)
+			reload.Logger.Debug("edit", "path", path)
 			if reload.OnReload != nil {
 				reload.OnReload()
 			}
@@ -67,14 +66,14 @@ func (reload *Reloader) WatchDirectories() {
 	for {
 		select {
 		case err := <-w.Errors:
-			reload.logError("error watching: %s \n", err)
+			reload.Logger.Error("error watching", "err", err)
 		case e := <-w.Events:
 			switch {
 			case e.Has(fsnotify.Create):
 				dir := filepath.Dir(e.Name)
 				// Watch any created directory
 				if err := w.Add(dir); err != nil {
-					reload.logError("error watching %s: %s\n", e.Name, err)
+					reload.Logger.Error("error watching", "name", e.Name, "err", err)
 					continue
 				}
 				debounce(callback(path.Base(e.Name)))

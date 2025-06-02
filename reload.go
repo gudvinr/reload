@@ -37,7 +37,7 @@ package reload
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -65,13 +65,7 @@ type Reloader struct {
 	// Browser will usually cache the resource if no changes occur after multiple requests.
 	DisableCaching bool
 
-	// Deprecated: Use ErrorLog instead.
-	Log *log.Logger
-
-	// Enable this logger to print debug information (when the reloads happen, etc)
-	DebugLog *log.Logger
-
-	ErrorLog *log.Logger
+	Logger *slog.Logger
 
 	// Used to upgrade connections to Websocket connections
 	Upgrader websocket.Upgrader
@@ -83,10 +77,12 @@ type Reloader struct {
 
 // New returns a new Reloader with the provided directories.
 func New(directories ...string) *Reloader {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
 	return &Reloader{
 		directories:    directories,
 		Endpoint:       "/reload_ws",
-		ErrorLog:       log.New(os.Stderr, "Reload: ", log.Lmsgprefix|log.Ltime),
+		Logger:         logger,
 		Upgrader:       websocket.Upgrader{},
 		DisableCaching: true,
 
@@ -164,12 +160,16 @@ func (reload *Reloader) Handle(next http.Handler) http.Handler {
 
 		// Avoid wrapping when there's no document expected.
 		if !expectingDocument(r.Header) {
-			reload.logDebug("assume no html (Sec-Fetch-Dest: %q; Accept: %q): %q", r.Header.Get("Sec-Fetch-Dest"), r.Header.Get("Accept"), r.URL.Path)
+			reload.Logger.DebugContext(r.Context(), "assume no html",
+				"sec-fetch-dest", r.Header.Get("Sec-Fetch-Dest"),
+				"accept", r.Header.Get("Accept"),
+				"path", r.URL.Path,
+			)
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		reload.logDebug("likely received request for HTML page: %q", r.URL.Path)
+		reload.Logger.DebugContext(r.Context(), "likely received request for HTML page", "path", r.URL.Path)
 
 		// set headers first so that they're sent with the initial response
 		if reload.DisableCaching {
@@ -179,7 +179,7 @@ func (reload *Reloader) Handle(next http.Handler) http.Handler {
 		wrap := newWrapResponseWriter(w, r.ProtoMajor, len(scriptToInject))
 
 		// teeBody is a fixed-size buffer that will be used to sniff the content type
-		var teeBody = &fixedBuffer{buf: make([]byte, 512)} // http.DetectContentType reads at most 512 bytes
+		teeBody := &fixedBuffer{buf: make([]byte, 512)} // http.DetectContentType reads at most 512 bytes
 		wrap.Tee(teeBody)
 
 		next.ServeHTTP(wrap, r)
@@ -204,16 +204,15 @@ func (reload *Reloader) Handle(next http.Handler) http.Handler {
 func (reload *Reloader) ServeWS(w http.ResponseWriter, r *http.Request) {
 	version := r.URL.Query().Get("v")
 	if version != wsCurrentVersion {
-		reload.logError(
-			"Injected script version is out of date (v%s < v%s)\n",
-			version,
-			wsCurrentVersion,
+		reload.Logger.ErrorContext(r.Context(), "Injected script version is out of date",
+			"got", version,
+			"expected", wsCurrentVersion,
 		)
 	}
 
 	conn, err := reload.Upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		reload.logError("ServeWS error: %s\n", err)
+		reload.Logger.ErrorContext(r.Context(), "ServeWS error", "err", err)
 		return
 	}
 
@@ -252,18 +251,6 @@ func InjectedScript(endpoint string) string {
 	}
 	listen(false)
 </script>`, endpoint, wsCurrentVersion)
-}
-
-func (r *Reloader) logDebug(format string, v ...any) {
-	if r.DebugLog != nil {
-		r.DebugLog.Printf(format, v...)
-	}
-}
-
-func (r *Reloader) logError(format string, v ...any) {
-	if r.ErrorLog != nil {
-		r.ErrorLog.Printf(format, v...)
-	}
 }
 
 // fixedBuffer implements io.Writer and writes to a fixed-size []byte slice.
