@@ -72,7 +72,7 @@ type Reloader struct {
 
 	// Used to trigger a reload on all websocket connections at once
 	cond           *sync.Cond
-	startedWatcher bool
+	startedWatcher sync.Once
 }
 
 // New returns a new Reloader with the provided directories.
@@ -86,8 +86,7 @@ func New(directories ...string) *Reloader {
 		Upgrader:       websocket.Upgrader{},
 		DisableCaching: true,
 
-		startedWatcher: false,
-		cond:           sync.NewCond(&sync.Mutex{}),
+		cond: sync.NewCond(&sync.Mutex{}),
 	}
 }
 
@@ -145,10 +144,10 @@ func expectingDocument(h http.Header) bool {
 // Handle starts the reload middleware, watching the specified directories and injecting the script into HTML responses.
 func (reload *Reloader) Handle(next http.Handler) http.Handler {
 	// Only init the watcher once
-	if !reload.startedWatcher {
+	reload.startedWatcher.Do(func() {
 		go reload.WatchDirectories()
-		reload.startedWatcher = true
-	}
+	})
+
 	scriptToInject := InjectedScript(reload.Endpoint)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
