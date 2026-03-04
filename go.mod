@@ -1,6 +1,6 @@
 module github.com/aarol/reload
 
-go 1.23
+go 1.25
 
 require (
 	github.com/bep/debounce v1.2.1
